@@ -251,7 +251,6 @@ pub async fn handle_season_ended(event: &crate::models::EventEnvelope, pool: &Pg
                 .ok();
 
             // Create notification for tier change
-            let notification_id = uuid::Uuid::new_v4();
             let title = format!("Season Ended: {} promoted to {}", ranking.clan_name, ranking.new_tier);
             let message = format!(
                 "Congratulations! Your clan {} has been promoted to {} tier after the season ended!",
@@ -267,6 +266,7 @@ pub async fn handle_season_ended(event: &crate::models::EventEnvelope, pool: &Pg
             .await
             {
                 for (user_id,) in members {
+                    let notification_id = uuid::Uuid::new_v4();
                     sqlx::query(
                         r#"INSERT INTO gamification.notifications (id, user_id, notification_type, title, message, is_read, created_at)
                            VALUES ($1, $2, 'season_ended', $3, $4, false, NOW())"#
@@ -478,7 +478,7 @@ pub async fn recalculate_clan_buffs(clan_id: Uuid, pool: &PgPool) {
     // Calculate Low Accuracy Debuff: avg accuracy <50%
     let avg_accuracy: f64 = sqlx::query_scalar(
         r#"
-        SELECT COALESCE(AVG(cr.accuracy), 0)
+        SELECT COALESCE(AVG(cr.accuracy), 0)::float8
         FROM quiz.completed_readings cr
         JOIN gamification.clan_members cm ON cr.user_id = cm.user_id
         WHERE cm.clan_id = $1 AND cr.completed_at >= NOW() - INTERVAL '7 days'
@@ -516,7 +516,7 @@ pub async fn recalculate_clan_buffs(clan_id: Uuid, pool: &PgPool) {
 
     // Update clan's effective score with multipliers
     let base_score: f64 = sqlx::query_scalar(
-        "SELECT COALESCE(total_score, 0) FROM gamification.clans WHERE id = $1"
+        "SELECT COALESCE(total_score, 0)::float8 FROM gamification.clans WHERE id = $1"
     )
     .bind(clan_id)
     .fetch_one(pool)
@@ -569,7 +569,7 @@ async fn activate_buff_if_needed(clan_id: Uuid, buff_type: &str, multiplier: f64
 
 async fn calculate_effective_multiplier(clan_id: Uuid, pool: &PgPool) -> f64 {
     let multiplier: f64 = sqlx::query_scalar(
-        "SELECT COALESCE(AVG(multiplier), 1.0) FROM gamification.buffs WHERE clan_id = $1 AND expires_at IS NULL"
+        "SELECT COALESCE(AVG(multiplier), 1.0)::float8 FROM gamification.buffs WHERE clan_id = $1 AND expires_at IS NULL"
     )
     .bind(clan_id)
     .fetch_one(pool)

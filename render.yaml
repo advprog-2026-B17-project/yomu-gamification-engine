@@ -6,9 +6,9 @@ services:
     dockerfilePath: ./Dockerfile
     healthCheckPath: /health
     envVars:
-      - key: APP_PORT
-        value: "8081"
       - key: CLOUDAMQP_URL
         sync: false
       - key: DATABASE_URL
+        sync: false
+      - key: GATEWAY_SHARED_SECRET
         sync: false
