@@ -5,6 +5,7 @@ pub struct AppConfig {
     pub database_url: String,
     pub rabbitmq_url: String,
     pub server_port: u16,
+    pub gateway_shared_secret: Option<String>,
 }
 
 pub fn load() -> AppConfig {
@@ -21,9 +22,13 @@ pub fn load() -> AppConfig {
             .unwrap_or_else(|_| "postgres://postgres:postgres@localhost:5432/gamification".into()),
         rabbitmq_url: std::env::var("CLOUDAMQP_URL")
             .unwrap_or_else(|_| "amqp://guest:guest@localhost:5672".into()),
-        server_port: std::env::var("APP_PORT")
+        server_port: std::env::var("PORT")
+            .or_else(|_| std::env::var("APP_PORT"))
             .unwrap_or_else(|_| "8081".into())
             .parse()
             .unwrap_or(8081),
+        gateway_shared_secret: std::env::var("GATEWAY_SHARED_SECRET")
+            .ok()
+            .filter(|value| !value.is_empty()),
     }
 }

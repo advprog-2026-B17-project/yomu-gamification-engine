@@ -5,7 +5,8 @@ mod models;
 mod rabbitmq;
 mod services;
 
-use actix_web::{web, App, HttpServer, middleware};
+use actix_web::{dev::Service, web, App, HttpResponse, HttpServer, middleware};
+use futures_util::future::{ready, Either, FutureExt};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[actix_web::main]
@@ -33,11 +34,34 @@ async fn main() -> std::io::Result<()> {
         rabbitmq::consume_events(consumer, pool_for_consumer).await;
     });
 
-    tracing::info!("Starting yomu-gamification-engine on :8081");
+    let gateway_shared_secret = config.gateway_shared_secret.clone();
+
+    tracing::info!("Starting yomu-gamification-engine on :{}", config.server_port);
 
     HttpServer::new(move || {
+        let gateway_shared_secret = gateway_shared_secret.clone();
+
         App::new()
             .wrap(middleware::Logger::default())
+            .wrap_fn(move |req, srv| {
+                let gateway_shared_secret = gateway_shared_secret.clone();
+                let protected = req.path().starts_with("/api/");
+                let authorized = gateway_shared_secret.as_deref().map_or(true, |secret| {
+                    req.headers()
+                        .get("X-Gateway-Secret")
+                        .and_then(|value| value.to_str().ok())
+                        .map_or(false, |value| value == secret)
+                });
+
+                if protected && !authorized {
+                    return Either::Left(ready(Ok(
+                        req.into_response(HttpResponse::Forbidden().finish())
+                            .map_into_right_body(),
+                    )));
+                }
+
+                Either::Right(srv.call(req).map(|res| res.map(|res| res.map_into_left_body())))
+            })
             .app_data(web::Data::new(pool.clone()))
             .route("/health", web::get().to(handlers::health))
             .route("/api/achievements/{user_id}", web::get().to(handlers::get_user_achievements))
