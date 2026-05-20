@@ -1,7 +1,18 @@
-use actix_web::{web, HttpResponse};
+use actix_web::{web, HttpRequest, HttpResponse};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use uuid::Uuid;
+
+/// Extract user_id from X-User-Id header first, fallback to path parameter
+fn extract_user_id(req: &HttpRequest, path_user_id: &str) -> Option<Uuid> {
+    // Try X-User-Id header first (from gateway)
+    req.headers()
+        .get("X-User-Id")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| Uuid::parse_str(s).ok())
+        // Fallback to path parameter
+        .or_else(|| Uuid::parse_str(path_user_id).ok())
+}
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct AchievementRow {
@@ -55,10 +66,12 @@ pub async fn health() -> HttpResponse {
 pub async fn get_user_achievements(
     pool: web::Data<PgPool>,
     path: web::Path<String>,
+    req: HttpRequest,
 ) -> HttpResponse {
-    let user_id = match Uuid::parse_str(&path.into_inner()) {
-        Ok(id) => id,
-        Err(_) => return HttpResponse::BadRequest().json(serde_json::json!({"error": "Invalid user ID"})),
+    let path_user_id = path.into_inner();
+    let user_id = match extract_user_id(&req, &path_user_id) {
+        Some(id) => id,
+        None => return HttpResponse::BadRequest().json(serde_json::json!({"error": "Invalid or missing user ID"})),
     };
 
     match sqlx::query_as::<_, AchievementRow>(
@@ -85,10 +98,12 @@ pub async fn get_user_achievements(
 pub async fn get_user_missions(
     pool: web::Data<PgPool>,
     path: web::Path<String>,
+    req: HttpRequest,
 ) -> HttpResponse {
-    let user_id = match Uuid::parse_str(&path.into_inner()) {
-        Ok(id) => id,
-        Err(_) => return HttpResponse::BadRequest().json(serde_json::json!({"error": "Invalid user ID"})),
+    let path_user_id = path.into_inner();
+    let user_id = match extract_user_id(&req, &path_user_id) {
+        Some(id) => id,
+        None => return HttpResponse::BadRequest().json(serde_json::json!({"error": "Invalid or missing user ID"})),
     };
 
     match sqlx::query_as::<_, MissionRow>(
@@ -150,10 +165,12 @@ pub async fn get_clan_leaderboard(
 pub async fn get_user_notifications(
     pool: web::Data<PgPool>,
     path: web::Path<String>,
+    req: HttpRequest,
 ) -> HttpResponse {
-    let user_id = match Uuid::parse_str(&path.into_inner()) {
-        Ok(id) => id,
-        Err(_) => return HttpResponse::BadRequest().json(serde_json::json!({"error": "Invalid user ID"})),
+    let path_user_id = path.into_inner();
+    let user_id = match extract_user_id(&req, &path_user_id) {
+        Some(id) => id,
+        None => return HttpResponse::BadRequest().json(serde_json::json!({"error": "Invalid or missing user ID"})),
     };
 
     match sqlx::query_as::<_, NotificationRow>(
@@ -204,10 +221,12 @@ pub async fn mark_notification_read(
 pub async fn get_unread_notification_count(
     pool: web::Data<PgPool>,
     path: web::Path<String>,
+    req: HttpRequest,
 ) -> HttpResponse {
-    let user_id = match Uuid::parse_str(&path.into_inner()) {
-        Ok(id) => id,
-        Err(_) => return HttpResponse::BadRequest().json(serde_json::json!({"error": "Invalid user ID"})),
+    let path_user_id = path.into_inner();
+    let user_id = match extract_user_id(&req, &path_user_id) {
+        Some(id) => id,
+        None => return HttpResponse::BadRequest().json(serde_json::json!({"error": "Invalid or missing user ID"})),
     };
 
     match sqlx::query_scalar::<_, i64>(
