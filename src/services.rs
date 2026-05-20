@@ -1,7 +1,7 @@
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::models::{Achievement, QuizCompletedPayload, ReadingCompletedPayload, SeasonEndedPayload, UserMission};
+use crate::models::{Achievement, QuizCompletedPayload, ReadingCompletedPayload, SeasonEndedPayload};
 
 pub async fn handle_reading_completed(event: &crate::models::EventEnvelope, pool: &PgPool) {
     tracing::info!("handle_reading_completed called for event_type: {}", event.event_type);
@@ -25,8 +25,8 @@ pub async fn handle_reading_completed(event: &crate::models::EventEnvelope, pool
         let today = chrono::Utc::now().date_naive();
 
         // Get all active missions with target_type 'reading' only
-        let missions_result = sqlx::query_as::<_, (Uuid, String)>(
-            "SELECT dm.id, dm.target_type FROM gamification.daily_missions dm WHERE dm.is_active = true AND dm.target_type = 'reading'"
+        let missions_result = sqlx::query_as::<_, (Uuid, String, i32)>(
+            "SELECT dm.id, dm.target_type, dm.target_count FROM gamification.daily_missions dm WHERE dm.is_active = true AND dm.target_type = 'reading'"
         )
         .fetch_all(pool)
         .await;
@@ -35,40 +35,13 @@ pub async fn handle_reading_completed(event: &crate::models::EventEnvelope, pool
             Ok(missions) => {
                 tracing::info!("Found {} active reading missions for user {}", missions.len(), user_id);
 
-                for (mission_id, target_type) in missions {
+                for (mission_id, target_type, target_count) in missions {
                     tracing::debug!("Checking mission {} (type: {}) for user {}", mission_id, target_type, user_id);
 
-                    // Find user's mission record for this daily mission
-                    let um_result = sqlx::query_as::<_, UserMission>(
-                        "SELECT * FROM gamification.user_missions WHERE user_id = $1 AND mission_id = $2 AND date = $3 AND claimed = false"
-                    )
-                    .bind(user_id)
-                    .bind(mission_id)
-                    .bind(today)
-                    .fetch_optional(pool)
-                    .await;
-
-                    match um_result {
-                        Ok(Some(um)) => {
-                            tracing::info!("Found user_mission {} for today, incrementing progress", um.id);
-                            if let Err(e) = sqlx::query(
-                                "UPDATE gamification.user_missions SET progress = progress + 1 WHERE id = $1"
-                            )
-                            .bind(um.id)
-                            .execute(pool)
-                            .await
-                            {
-                                tracing::error!("Failed to update mission progress: {}", e);
-                            } else {
-                                tracing::info!("Updated mission {} (type: {}) for user {}", mission_id, target_type, user_id);
-                            }
-                        }
-                        Ok(None) => {
-                            tracing::debug!("No user_mission found for mission {} on date {}", mission_id, today);
-                        }
-                        Err(e) => {
-                            tracing::error!("Error fetching user_mission: {}", e);
-                        }
+                    if let Err(e) = upsert_mission_progress(user_id, mission_id, today, target_count, pool).await {
+                        tracing::error!("Failed to update mission progress: {}", e);
+                    } else {
+                        tracing::info!("Updated mission {} (type: {}) for user {}", mission_id, target_type, user_id);
                     }
                 }
             }
@@ -79,6 +52,7 @@ pub async fn handle_reading_completed(event: &crate::models::EventEnvelope, pool
 
         // Check achievements
         check_and_unlock_achievements(user_id, pool).await;
+        recalculate_user_clan_buffs(user_id, pool).await;
     }
 }
 
@@ -105,8 +79,8 @@ pub async fn handle_quiz_completed(event: &crate::models::EventEnvelope, pool: &
         let today = chrono::Utc::now().date_naive();
 
         // Get all active missions with target_type 'reading' or 'quiz'
-        let missions_result = sqlx::query_as::<_, (Uuid, String)>(
-            "SELECT dm.id, dm.target_type FROM gamification.daily_missions dm WHERE dm.is_active = true AND dm.target_type IN ('reading', 'quiz')"
+        let missions_result = sqlx::query_as::<_, (Uuid, String, i32)>(
+            "SELECT dm.id, dm.target_type, dm.target_count FROM gamification.daily_missions dm WHERE dm.is_active = true AND dm.target_type IN ('reading', 'quiz')"
         )
         .fetch_all(pool)
         .await;
@@ -115,41 +89,13 @@ pub async fn handle_quiz_completed(event: &crate::models::EventEnvelope, pool: &
             Ok(missions) => {
                 tracing::info!("Found {} active missions for user {}", missions.len(), user_id);
 
-            for (mission_id, target_type) in missions {
+            for (mission_id, target_type, target_count) in missions {
                 tracing::debug!("Checking mission {} (type: {}) for user {}", mission_id, target_type, user_id);
 
-                // Find user's mission record for this daily mission
-                let um_result = sqlx::query_as::<_, UserMission>(
-                    "SELECT * FROM gamification.user_missions WHERE user_id = $1 AND mission_id = $2 AND date = $3 AND claimed = false"
-                )
-                .bind(user_id)
-                .bind(mission_id)
-                .bind(today)
-                .fetch_optional(pool)
-                .await;
-
-                match um_result {
-                    Ok(Some(um)) => {
-                        tracing::info!("Found user_mission {} for today, incrementing progress", um.id);
-                        // Increment progress
-                        if let Err(e) = sqlx::query(
-                            "UPDATE gamification.user_missions SET progress = progress + 1 WHERE id = $1"
-                        )
-                        .bind(um.id)
-                        .execute(pool)
-                        .await
-                        {
-                            tracing::error!("Failed to update mission progress: {}", e);
-                        } else {
-                            tracing::info!("Updated mission {} (type: {}) for user {}", mission_id, target_type, user_id);
-                        }
-                    }
-                    Ok(None) => {
-                        tracing::debug!("No user_mission found for mission {} on date {}", mission_id, today);
-                    }
-                    Err(e) => {
-                        tracing::error!("Error fetching user_mission: {}", e);
-                    }
+                if let Err(e) = upsert_mission_progress(user_id, mission_id, today, target_count, pool).await {
+                    tracing::error!("Failed to update mission progress: {}", e);
+                } else {
+                    tracing::info!("Updated mission {} (type: {}) for user {}", mission_id, target_type, user_id);
                 }
             }
         }
@@ -163,6 +109,49 @@ pub async fn handle_quiz_completed(event: &crate::models::EventEnvelope, pool: &
 
         // Check for "Ahli Kuis" perfect score achievement (score == 100)
         check_and_unlock_quiz_perfect_achievement(user_id, payload.score, pool).await;
+        recalculate_user_clan_buffs(user_id, pool).await;
+    }
+}
+
+async fn upsert_mission_progress(
+    user_id: Uuid,
+    mission_id: Uuid,
+    date: chrono::NaiveDate,
+    target_count: i32,
+    pool: &PgPool,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"
+        INSERT INTO gamification.user_missions AS um (id, user_id, mission_id, progress, claimed, date)
+        VALUES ($1, $2, $3, 1, false, $4)
+        ON CONFLICT (user_id, mission_id, date)
+        DO UPDATE SET progress = CASE
+            WHEN um.claimed THEN um.progress
+            ELSE LEAST(um.progress + 1, $5)
+        END
+        "#
+    )
+    .bind(Uuid::new_v4())
+    .bind(user_id)
+    .bind(mission_id)
+    .bind(date)
+    .bind(target_count)
+    .execute(pool)
+    .await
+    .map(|_| ())
+}
+
+async fn recalculate_user_clan_buffs(user_id: Uuid, pool: &PgPool) {
+    let clan_id: Option<Uuid> = sqlx::query_scalar(
+        "SELECT clan_id FROM gamification.clan_members WHERE user_id = $1"
+    )
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await
+    .unwrap_or(None);
+
+    if let Some(clan_id) = clan_id {
+        recalculate_clan_buffs(clan_id, pool).await;
     }
 }
 
@@ -514,26 +503,8 @@ pub async fn recalculate_clan_buffs(clan_id: Uuid, pool: &PgPool) {
         activate_buff_if_needed(clan_id, "inactive_penalty", 0.9, pool).await;
     }
 
-    // Update clan's effective score with multipliers
-    let base_score: f64 = sqlx::query_scalar(
-        "SELECT COALESCE(total_score, 0)::float8 FROM gamification.clans WHERE id = $1"
-    )
-    .bind(clan_id)
-    .fetch_one(pool)
-    .await
-    .unwrap_or(0.0);
-
     let multiplier = calculate_effective_multiplier(clan_id, pool).await;
-    let effective_score = base_score * multiplier;
-
-    if let Err(e) = sqlx::query("UPDATE gamification.clans SET total_score = $1 WHERE id = $2")
-        .bind(effective_score)
-        .bind(clan_id)
-        .execute(pool)
-        .await
-    {
-        tracing::error!("Gagal update total_score clan {}: {}", clan_id, e);
-    }
+    tracing::info!("Recalculated active multiplier {} for clan {}", multiplier, clan_id);
 }
 
 async fn activate_buff_if_needed(clan_id: Uuid, buff_type: &str, multiplier: f64, pool: &PgPool) {
@@ -569,7 +540,7 @@ async fn activate_buff_if_needed(clan_id: Uuid, buff_type: &str, multiplier: f64
 
 async fn calculate_effective_multiplier(clan_id: Uuid, pool: &PgPool) -> f64 {
     let multiplier: f64 = sqlx::query_scalar(
-        "SELECT COALESCE(AVG(multiplier), 1.0)::float8 FROM gamification.buffs WHERE clan_id = $1 AND expires_at IS NULL"
+        "SELECT COALESCE(EXP(SUM(LN(multiplier)) FILTER (WHERE expires_at IS NULL)), 1.0)::float8 FROM gamification.buffs WHERE clan_id = $1"
     )
     .bind(clan_id)
     .fetch_one(pool)
