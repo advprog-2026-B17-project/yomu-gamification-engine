@@ -146,7 +146,9 @@ pub async fn get_user_missions(
     match sqlx::query_as::<_, MissionRow>(
         r#"
         SELECT dm.id::text as id, dm.title, dm.description, dm.target_type, dm.target_count, dm.xp_reward,
-               um.progress, um.claimed, um.date
+               COALESCE(um.progress, 0) as progress,
+               COALESCE(um.claimed, false) as claimed,
+               COALESCE(um.date, CURRENT_DATE) as date
         FROM gamification.daily_missions dm
         LEFT JOIN gamification.user_missions um ON dm.id = um.mission_id AND um.user_id = $1 AND um.date = CURRENT_DATE
         WHERE dm.is_active = true
@@ -172,16 +174,18 @@ pub async fn get_clans(
 
     match sqlx::query_as::<_, ClanRow>(
         r#"
-        SELECT c.id::text as id, c.name, c.tier, COALESCE(c.total_score, 0)::float8 as total_score,
+        SELECT c.id::text as id, c.name, c.tier,
+               (COALESCE(c.total_score, 0) * COALESCE(EXP(SUM(LN(b.multiplier)) FILTER (WHERE b.expires_at IS NULL)), 1.0))::float8 as total_score,
                c.leader_id::text as leader_id,
                COALESCE(u.display_name, u.username, 'Unknown') as leader_name,
-               COUNT(cm.id)::int8 as member_count,
+               COUNT(DISTINCT cm.id)::int8 as member_count,
                MAX(CASE WHEN cm.user_id = $1 THEN cm.role ELSE NULL END) as my_role
         FROM gamification.clans c
         LEFT JOIN auth.users u ON c.leader_id = u.id
         LEFT JOIN gamification.clan_members cm ON c.id = cm.clan_id
+        LEFT JOIN gamification.buffs b ON c.id = b.clan_id
         GROUP BY c.id, c.name, c.tier, c.total_score, c.leader_id, u.display_name, u.username
-        ORDER BY c.total_score DESC, c.name ASC
+        ORDER BY total_score DESC, c.name ASC
         "#
     )
     .bind(user_id)
@@ -242,8 +246,8 @@ pub async fn get_global_clan_leaderboard(
         SELECT c.id::text as clan_id, c.name as clan_name, c.tier,
                COALESCE(c.total_score, 0)::float8 as total_score,
                COUNT(DISTINCT cm.id)::int8 as member_count,
-               COALESCE(AVG(b.multiplier) FILTER (WHERE b.expires_at IS NULL), 1.0)::float8 as multiplier,
-               (COALESCE(c.total_score, 0) * COALESCE(AVG(b.multiplier) FILTER (WHERE b.expires_at IS NULL), 1.0))::float8 as effective_score
+               COALESCE(EXP(SUM(LN(b.multiplier)) FILTER (WHERE b.expires_at IS NULL)), 1.0)::float8 as multiplier,
+               (COALESCE(c.total_score, 0) * COALESCE(EXP(SUM(LN(b.multiplier)) FILTER (WHERE b.expires_at IS NULL)), 1.0))::float8 as effective_score
         FROM gamification.clans c
         LEFT JOIN gamification.clan_members cm ON c.id = cm.clan_id
         LEFT JOIN gamification.buffs b ON c.id = b.clan_id
@@ -332,20 +336,27 @@ pub async fn get_user_notifications(
 pub async fn mark_notification_read(
     pool: web::Data<PgPool>,
     path: web::Path<String>,
+    req: HttpRequest,
 ) -> HttpResponse {
+    let user_id = match extract_header_user_id(&req) {
+        Some(id) => id,
+        None => return HttpResponse::Unauthorized().json(serde_json::json!({"error": "Missing user ID"})),
+    };
     let notification_id = match Uuid::parse_str(&path.into_inner()) {
         Ok(id) => id,
         Err(_) => return HttpResponse::BadRequest().json(serde_json::json!({"error": "Invalid notification ID"})),
     };
 
     match sqlx::query(
-        "UPDATE gamification.notifications SET is_read = true WHERE id = $1"
+        "UPDATE gamification.notifications SET is_read = true WHERE id = $1 AND user_id = $2"
     )
     .bind(notification_id)
+    .bind(user_id)
     .execute(pool.get_ref())
     .await
     {
-        Ok(_) => HttpResponse::Ok().json(serde_json::json!({"status": "ok"})),
+        Ok(result) if result.rows_affected() > 0 => HttpResponse::Ok().json(serde_json::json!({"status": "ok"})),
+        Ok(_) => HttpResponse::NotFound().json(serde_json::json!({"error": "Notification not found"})),
         Err(e) => {
             tracing::error!("Failed to mark notification as read: {}", e);
             HttpResponse::InternalServerError().json(serde_json::json!({"error": "Internal error"}))
