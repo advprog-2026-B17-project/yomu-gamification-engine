@@ -1,7 +1,7 @@
 services:
   - type: web
     name: yomu-gamification-engine
-    env: docker
+    runtime: docker
     region: singapore
     dockerfilePath: ./Dockerfile
     healthCheckPath: /health
@@ -12,3 +12,5 @@ services:
         sync: false
       - key: GATEWAY_SHARED_SECRET
         sync: false
+      - key: RUST_LOG
+        value: info
